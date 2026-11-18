@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Admin console{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<section class="card">
+  <table>
+    <tr><th>ID</th><th>Username</th><th>Role</th><th>Entries</th><th>State</th><th></th></tr>
+    {% for u in users %}
+    <tr>
+      <td>{{ u['id'] }}</td><td>{{ u['username'] }}</td>
+      <td>{{ 'Administrator' if u['is_admin'] else 'Standard' }}</td>
+      <td>{{ u['submission_count'] }} / {{ max_logs }}</td>
+      <td>{{ 'Locked' if u['locked'] else 'Active' }}</td>
+      <td>{% if not u['is_admin'] %}
+        <form method="post" action="{{ url_for('toggle_lock', user_id=u['id']) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="small">{{ 'Unlock' if u['locked'] else 'Lock' }}</button></form>{% endif %}</td>
+    </tr>{% endfor %}
+  </table>
+</section>
+
+<h1>All logs</h1>
+<p>Filter:
+  <a href="{{ url_for('admin') }}">All</a>
+  {% for s in statuses %}| <a href="{{ url_for('admin', status=s) }}">{{ s }}</a>{% endfor %}
+  {% if current %}<span class="muted">(showing {{ current }})</span>{% endif %}</p>
+<section class="card">
+  <table>
+    <tr><th>#</th><th>User</th><th>Service</th><th>Status</th><th>Description</th><th>When (UTC)</th><th></th></tr>
+    {% for l in logs %}
+    <tr class="{{ 'flagged' if l['flagged'] }}">
+      <td>{{ l['id'] }}</td><td>{{ l['username'] }}</td><td>{{ l['service'] }}</td>
+      <td><span class="badge {{ l['status']|lower }}">{{ l['status'] }}</span></td>
+      <td>{{ l['description'] }}</td><td>{{ l['created_at'] }}</td>
+      <td class="actions">
+        <form method="post" action="{{ url_for('flag_log', log_id=l['id']) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="small">{{ 'Unflag' if l['flagged'] else 'Flag' }}</button></form>
+        <form method="post" action="{{ url_for('delete_log', log_id=l['id']) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="small danger" title="Permanently delete this log">Delete</button></form></td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="muted">No logs.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

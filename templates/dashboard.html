@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>System metrics <small class="muted" id="updated">refreshes every 5 seconds</small></h1>
+<p class="muted">Metrics reflect the environment visible to the container; CPU, memory and uptime may represent the host depending on runtime isolation.</p>
+<section class="grid">
+  <div class="card"><h3>CPU</h3>
+    <p class="big"><span id="cpu">{{ metrics.cpu_percent }}</span>%</p>
+    <progress id="cpu-bar" max="100" value="{{ metrics.cpu_percent }}"></progress>
+    <p class="muted">{{ metrics.cpu_count }} cores &middot; load <span id="load">{{ metrics.load|join(' / ') }}</span></p></div>
+  <div class="card"><h3>Memory</h3>
+    <p class="big"><span id="mem">{{ metrics.mem_percent }}</span>%</p>
+    <progress id="mem-bar" max="100" value="{{ metrics.mem_percent }}"></progress>
+    <p class="muted"><span id="mem-used">{{ metrics.mem_used_mb }}</span> / {{ metrics.mem_total_mb }} MB</p></div>
+  <div class="card"><h3>Disk (/)</h3>
+    <p class="big"><span id="disk">{{ metrics.disk_percent }}</span>%</p>
+    <progress id="disk-bar" max="100" value="{{ metrics.disk_percent }}"></progress>
+    <p class="muted"><span id="disk-used">{{ metrics.disk_used_gb }}</span> / {{ metrics.disk_total_gb }} GB</p></div>
+  <div class="card"><h3>Host uptime (as visible)</h3>
+    <p class="big"><span id="uptime">{{ metrics.uptime_min }}</span> min</p></div>
+</section>
+
+<h1>Submit a log entry</h1>
+<section class="card">
+  {% if g.user['locked'] %}
+    <p class="flash error">Your account has been locked by an administrator. You can no longer submit entries.</p>
+  {% else %}
+    <p class="muted">You have used {{ g.user['submission_count'] }} of {{ max_logs }} allowed entries.</p>
+    {% if g.user['submission_count'] >= max_logs %}<p class="flash error">Your submission allowance is exhausted. Contact an administrator if necessary.</p>{% else %}
+    <form method="post" action="{{ url_for('submit_log') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Service name <input name="service" required maxlength="64"></label>
+      <label>Status
+        <select name="status" required>{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select></label>
+      <label>Description <textarea name="description" required maxlength="1000" rows="4"></textarea></label>
+      <button>Submit</button>
+    </form>
+    {% endif %}
+  {% endif %}
+</section>
+
+<h1>Your entries</h1>
+<section class="card">
+  <table>
+    <tr><th>#</th><th>Service</th><th>Status</th><th>Description</th><th>When (UTC)</th></tr>
+    {% for l in logs %}
+    <tr class="{{ 'flagged' if l['flagged'] }}">
+      <td>{{ l['id'] }}</td><td>{{ l['service'] }}</td>
+      <td><span class="badge {{ l['status']|lower }}">{{ l['status'] }}</span></td>
+      <td>{{ l['description'] }}{% if l['flagged'] %} <em>(flagged)</em>{% endif %}</td>
+      <td>{{ l['created_at'] }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">Nothing submitted yet.</td></tr>{% endfor %}
+  </table>
+</section>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+{% endblock %}

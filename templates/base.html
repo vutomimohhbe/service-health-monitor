@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Service Health Monitor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <a class="brand" href="{{ url_for('index') }}">&#9889; Service Health Monitor</a>
+  <nav>
+  {% if g.user %}
+    <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    {% if g.user['is_admin'] %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
+    <span class="who">{{ g.user['username'] }}{% if g.user['is_admin'] %} (admin){% endif %}</span>
+    <form method="post" action="{{ url_for('logout') }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="link">Log out</button>
+    </form>
+  {% else %}
+    <a href="{{ url_for('login') }}">Log in</a>
+    <a href="{{ url_for('register') }}">Register</a>
+  {% endif %}
+  </nav>
+</header>
+<main>
+  {% for category, message in get_flashed_messages(with_categories=true) %}
+    <div class="flash {{ category }}">{{ message }}</div>
+  {% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
