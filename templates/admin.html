@@ -1,46 +1,79 @@
 {% extends "base.html" %}
 {% block title %}Admin console{% endblock %}
 {% block content %}
-<h1>Users</h1>
+<h1>Users and support team</h1>
 <section class="card">
   <table>
-    <tr><th>ID</th><th>Username</th><th>Role</th><th>Entries</th><th>State</th><th></th></tr>
+    <tr><th>ID</th><th>Username</th><th>Role</th><th>Tickets</th><th>State</th><th>Actions</th></tr>
     {% for u in users %}
     <tr>
       <td>{{ u['id'] }}</td><td>{{ u['username'] }}</td>
-      <td>{{ 'Administrator' if u['is_admin'] else 'Standard' }}</td>
+      <td>{{ 'Administrator' if u['is_admin'] else ('Support' if u['is_support'] else 'User') }}</td>
       <td>{{ u['submission_count'] }} / {{ max_logs }}</td>
       <td>{{ 'Locked' if u['locked'] else 'Active' }}</td>
-      <td>{% if not u['is_admin'] %}
+      <td class="actions">
+        {% if not u['is_admin'] %}
+        <form method="post" action="{{ url_for('toggle_support', user_id=u['id']) }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="small">{{ 'Remove support' if u['is_support'] else 'Make support' }}</button>
+        </form>
         <form method="post" action="{{ url_for('toggle_lock', user_id=u['id']) }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="small">{{ 'Unlock' if u['locked'] else 'Lock' }}</button></form>{% endif %}</td>
-    </tr>{% endfor %}
+          <button class="small">{{ 'Unlock' if u['locked'] else 'Lock' }}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
   </table>
 </section>
 
-<h1>All logs</h1>
-<p>Filter:
-  <a href="{{ url_for('admin') }}">All</a>
-  {% for s in statuses %}| <a href="{{ url_for('admin', status=s) }}">{{ s }}</a>{% endfor %}
-  {% if current %}<span class="muted">(showing {{ current }})</span>{% endif %}</p>
+<div class="section-heading">
+  <h1>Incident tickets</h1>
+  <a class="button-link" href="{{ url_for('export_tickets', user=current['user'], service=current['service'], from_date=current['from_date'], to_date=current['to_date'], priority=current['priority'], service_status=current['service_status'], ticket_status=current['ticket_status']) }}">Export filtered CSV</a>
+</div>
+<form class="card ticket-filters" method="get" action="{{ url_for('admin') }}">
+  <label>Requester <input name="user" value="{{ current['user'] }}" maxlength="32" placeholder="Username"></label>
+  <label>Service <input name="service" value="{{ current['service'] }}" maxlength="64" placeholder="Service contains..."></label>
+  <label>From (UTC) <input type="date" name="from_date" value="{{ current['from_date'] }}"></label>
+  <label>To (UTC) <input type="date" name="to_date" value="{{ current['to_date'] }}"></label>
+  <label>Priority
+    <select name="priority"><option value="">All</option>{% for p in priorities %}<option {% if p == current['priority'] %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
+  </label>
+  <label>Service status
+    <select name="service_status"><option value="">All</option>{% for s in service_statuses %}<option {% if s == current['service_status'] %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+  </label>
+  <label>Ticket status
+    <select name="ticket_status"><option value="">All</option>{% for s in ticket_statuses %}<option {% if s == current['ticket_status'] %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+  </label>
+  <div class="filter-actions"><button>Filter</button><a href="{{ url_for('admin') }}">Clear</a></div>
+</form>
 <section class="card">
   <table>
-    <tr><th>#</th><th>User</th><th>Service</th><th>Status</th><th>Description</th><th>When (UTC)</th><th></th></tr>
-    {% for l in logs %}
-    <tr class="{{ 'flagged' if l['flagged'] }}">
-      <td>{{ l['id'] }}</td><td>{{ l['username'] }}</td><td>{{ l['service'] }}</td>
-      <td><span class="badge {{ l['status']|lower }}">{{ l['status'] }}</span></td>
-      <td>{{ l['description'] }}</td><td>{{ l['created_at'] }}</td>
+    <tr><th>Reference</th><th>Requester</th><th>Service</th><th>Ticket status</th><th>Priority</th><th>Assigned</th><th>Description</th><th>Created (UTC)</th><th>Resolution</th><th>Actions</th></tr>
+    {% for t in tickets %}
+    <tr class="{{ 'flagged' if t['flagged'] }}">
+      <td><a href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">{{ t['ticket_ref'] }}</a></td>
+      <td>{{ t['username'] }}</td>
+      <td>{{ t['service'] }}<small class="muted"> · {{ t['status'] }}</small></td>
+      <td><span class="badge ticket-{{ t['ticket_status']|lower|replace(' ', '-') }}">{{ t['ticket_status'] }}</span></td>
+      <td><span class="badge priority-{{ t['priority']|lower }}">{{ t['priority'] }}</span></td>
+      <td>{{ t['assigned_name'] or 'Unassigned' }}</td>
+      <td>{{ t['description'] }}</td>
+      <td>{{ t['created_at'] }}</td>
+      <td>{% if t['resolution_seconds'] is not none %}{{ t['resolution_seconds'] // 3600 }}h {{ (t['resolution_seconds'] % 3600) // 60 }}m{% else %}—{% endif %}</td>
       <td class="actions">
-        <form method="post" action="{{ url_for('flag_log', log_id=l['id']) }}" class="inline">
+        <form method="post" action="{{ url_for('flag_log', log_id=t['id']) }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="small">{{ 'Unflag' if l['flagged'] else 'Flag' }}</button></form>
-        <form method="post" action="{{ url_for('delete_log', log_id=l['id']) }}" class="inline">
+          <button class="small">{{ 'Unflag' if t['flagged'] else 'Flag' }}</button>
+        </form>
+        <form method="post" action="{{ url_for('delete_log', log_id=t['id']) }}" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="small danger" title="Permanently delete this log">Delete</button></form></td>
+          <button class="small danger" title="Permanently delete this ticket">Delete</button>
+        </form>
+      </td>
     </tr>
-    {% else %}<tr><td colspan="7" class="muted">No logs.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="10" class="muted">No matching tickets.</td></tr>{% endfor %}
   </table>
 </section>
 {% endblock %}

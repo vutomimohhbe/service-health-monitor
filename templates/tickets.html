@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Tickets{% endblock %}
+{% block content %}
+<h1>{% if g.user['is_support'] and not g.user['is_admin'] %}My support queue{% else %}Tickets{% endif %}</h1>
+<p class="muted">Tickets you submitted{% if g.user['is_support'] %} and tickets assigned to you{% endif %}.</p>
+<section class="card">
+  <table>
+    <tr><th>Reference</th><th>Service</th><th>Requester</th><th>Status</th><th>Priority</th><th>Assigned to</th><th>Created (UTC)</th></tr>
+    {% for t in tickets %}
+    <tr>
+      <td><a href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">{{ t['ticket_ref'] }}</a></td>
+      <td>{{ t['service'] }}<small class="muted"> · {{ t['status'] }}</small></td>
+      <td>{{ t['username'] }}</td>
+      <td><span class="badge ticket-{{ t['ticket_status']|lower|replace(' ', '-') }}">{{ t['ticket_status'] }}</span></td>
+      <td><span class="badge priority-{{ t['priority']|lower }}">{{ t['priority'] }}</span></td>
+      <td>{{ t['assigned_name'] or 'Unassigned' }}</td>
+      <td>{{ t['created_at'] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="muted">No tickets found.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

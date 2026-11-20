@@ -1,8 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>System metrics <small class="muted" id="updated">refreshes every 5 seconds</small></h1>
-<p class="muted">Metrics reflect the environment visible to the container; CPU, memory and uptime may represent the host depending on runtime isolation.</p>
+<section class="dashboard-hero">
+  <div>
+    <p class="eyebrow">University of Pretoria</p>
+    <h1>System metrics</h1>
+    <p class="hero-meta"><span class="live-dot"></span><span id="updated">refreshes every 5 seconds</span></p>
+  </div>
+  <img class="hero-emblem" src="{{ url_for('static', filename='up-emblem.png') }}" alt="University of Pretoria emblem">
+</section>
+<p class="metrics-note">Metrics reflect the environment visible to the container; CPU, memory and uptime may represent the host depending on runtime isolation.</p>
 <section class="grid">
   <div class="card"><h3>CPU</h3>
     <p class="big"><span id="cpu">{{ metrics.cpu_percent }}</span>%</p>
@@ -20,37 +27,78 @@
     <p class="big"><span id="uptime">{{ metrics.uptime_min }}</span> min</p></div>
 </section>
 
-<h1>Submit a log entry</h1>
+<h1>Resource utilization</h1>
+<section class="card history-card">
+  <div class="history-heading">
+    <p class="muted">Last 24 hours · sampled about once per minute while a dashboard is open</p>
+    <p class="muted" id="history-updated"></p>
+  </div>
+  <ul class="chart-legend" aria-label="Chart series">
+    <li><span class="legend-dot cpu"></span>CPU</li>
+    <li><span class="legend-dot memory"></span>Memory</li>
+    <li><span class="legend-dot disk"></span>Disk</li>
+  </ul>
+  <p class="chart-empty muted" id="history-empty">Collecting samples. The chart will appear as history builds.</p>
+  <svg class="resource-chart" id="resource-chart" viewBox="0 0 720 230" role="img"
+       aria-labelledby="history-chart-title history-chart-description">
+    <title id="history-chart-title">CPU, memory, and disk usage over the last 24 hours</title>
+    <desc id="history-chart-description">Percent utilization over time, sampled approximately once per minute when the dashboard is open.</desc>
+    <g class="chart-grid">
+      <line x1="58" y1="20" x2="700" y2="20"></line>
+      <line x1="58" y1="58" x2="700" y2="58"></line>
+      <line x1="58" y1="96" x2="700" y2="96"></line>
+      <line x1="58" y1="134" x2="700" y2="134"></line>
+      <line x1="58" y1="172" x2="700" y2="172"></line>
+      <text x="34" y="24">100</text>
+      <text x="40" y="62">75</text>
+      <text x="40" y="100">50</text>
+      <text x="40" y="138">25</text>
+      <text x="45" y="176">0</text>
+      <text x="58" y="205">24h ago</text>
+      <text x="370" y="205" text-anchor="middle">12h ago</text>
+      <text x="700" y="205" text-anchor="end">Now</text>
+      <text x="15" y="13">%</text>
+    </g>
+    <g id="history-series"></g>
+  </svg>
+</section>
+
+<h1>Submit a support ticket</h1>
 <section class="card">
   {% if g.user['locked'] %}
-    <p class="flash error">Your account has been locked by an administrator. You can no longer submit entries.</p>
+    <p class="flash error">Your account has been locked by an administrator. You can no longer submit tickets.</p>
   {% else %}
-    <p class="muted">You have used {{ g.user['submission_count'] }} of {{ max_logs }} allowed entries.</p>
-    {% if g.user['submission_count'] >= max_logs %}<p class="flash error">Your submission allowance is exhausted. Contact an administrator if necessary.</p>{% else %}
-    <form method="post" action="{{ url_for('submit_log') }}">
+    <p class="muted">You have used {{ g.user['submission_count'] }} of {{ max_logs }} allowed tickets.</p>
+    {% if g.user['submission_count'] >= max_logs %}<p class="flash error">Your ticket allowance is exhausted. Contact an administrator if necessary.</p>{% else %}
+    <form method="post" action="{{ url_for('create_ticket') }}" id="ticket-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label>Service name <input name="service" required maxlength="64"></label>
-      <label>Status
-        <select name="status" required>{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select></label>
+      <div id="duplicate-suggestions" class="duplicate-suggestions" aria-live="polite" hidden></div>
+      <label>Service status
+        <select name="service_status" required>{% for s in statuses %}<option>{{ s }}</option>{% endfor %}</select></label>
+      <label>Priority
+        <select name="priority" required>{% for p in priorities %}<option value="{{ p }}" {% if p == 'Medium' %}selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
       <label>Description <textarea name="description" required maxlength="1000" rows="4"></textarea></label>
-      <button>Submit</button>
+      <button>Submit ticket</button>
     </form>
     {% endif %}
   {% endif %}
 </section>
 
-<h1>Your entries</h1>
+<h1>Your tickets</h1>
 <section class="card">
   <table>
-    <tr><th>#</th><th>Service</th><th>Status</th><th>Description</th><th>When (UTC)</th></tr>
-    {% for l in logs %}
-    <tr class="{{ 'flagged' if l['flagged'] }}">
-      <td>{{ l['id'] }}</td><td>{{ l['service'] }}</td>
-      <td><span class="badge {{ l['status']|lower }}">{{ l['status'] }}</span></td>
-      <td>{{ l['description'] }}{% if l['flagged'] %} <em>(flagged)</em>{% endif %}</td>
-      <td>{{ l['created_at'] }}</td></tr>
-    {% else %}<tr><td colspan="5" class="muted">Nothing submitted yet.</td></tr>{% endfor %}
+    <tr><th>Reference</th><th>Service</th><th>Ticket status</th><th>Priority</th><th>Created (UTC)</th></tr>
+    {% for t in tickets %}
+    <tr class="{{ 'flagged' if t['flagged'] }}">
+      <td><a href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">{{ t['ticket_ref'] }}</a></td>
+      <td>{{ t['service'] }}<small class="muted"> · {{ t['status'] }}</small></td>
+      <td><span class="badge ticket-{{ t['ticket_status']|lower|replace(' ', '-') }}">{{ t['ticket_status'] }}</span></td>
+      <td><span class="badge priority-{{ t['priority']|lower }}">{{ t['priority'] }}</span></td>
+      <td>{{ t['created_at'] }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">No tickets yet.</td></tr>{% endfor %}
   </table>
 </section>
 <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='ticket-form.js') }}"></script>
 {% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Notifications{% endblock %}
+{% block content %}
+<h1>Notifications</h1>
+<section class="card">
+  {% for notification in notifications %}
+  <article class="notification-item {{ 'unread' if not notification['read_at'] }}">
+    <div>
+      <p>{{ notification['message'] }}</p>
+      <small class="muted">{{ notification['created_at'] }} UTC</small>
+      {% if notification['ticket_ref'] %}
+      <a href="{{ url_for('ticket_detail', ticket_id=notification['log_id']) }}">View {{ notification['ticket_ref'] }}</a>
+      {% endif %}
+    </div>
+    {% if not notification['read_at'] %}
+    <form method="post" action="{{ url_for('mark_notification_read', notification_id=notification['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="small">Mark read</button>
+    </form>
+    {% endif %}
+  </article>
+  {% else %}<p class="muted">You're all caught up.</p>{% endfor %}
+</section>
+{% endblock %}

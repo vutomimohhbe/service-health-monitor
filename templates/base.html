@@ -8,12 +8,17 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="{{ url_for('index') }}">&#9889; Service Health Monitor</a>
+  <a class="brand" href="{{ url_for('index') }}">
+    <img class="brand-emblem" src="{{ url_for('static', filename='up-emblem.png') }}" alt="">
+    <span><small>University of Pretoria</small><strong>Service Health Monitor</strong></span>
+  </a>
   <nav>
   {% if g.user %}
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    <a href="{{ url_for('ticket_queue') }}">Tickets</a>
     {% if g.user['is_admin'] %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-    <span class="who">{{ g.user['username'] }}{% if g.user['is_admin'] %} (admin){% endif %}</span>
+    <a href="{{ url_for('notifications') }}">Notifications{% if g.unread_notifications %} ({{ g.unread_notifications }}){% endif %}</a>
+    <span class="who">{{ g.user['username'] }}{% if g.user['is_admin'] %} (admin){% elif g.user['is_support'] %} (support){% endif %}</span>
     <form method="post" action="{{ url_for('logout') }}" class="inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="link">Log out</button>

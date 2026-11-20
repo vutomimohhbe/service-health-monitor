@@ -1,8 +1,5 @@
-# Built from scratch on plain Alpine (no python:alpine / node:alpine images).
 FROM alpine:3.22
 
-# Python, Flask, Flask-WTF (CSRF), psutil, gunicorn and SQLite come from Alpine's
-# own signed package repos, so no pip/compilers are needed (smaller attack surface).
 RUN apk add --no-cache python3 py3-flask py3-flask-wtf py3-psutil py3-gunicorn py3-cryptography sqlite
 
 # Unprivileged user + persistent data dir

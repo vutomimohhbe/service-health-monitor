@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}{{ ticket['ticket_ref'] }}{% endblock %}
+{% block content %}
+<p class="muted"><a href="{{ url_for('ticket_queue') }}">Tickets</a> / {{ ticket['ticket_ref'] }}</p>
+<section class="ticket-heading">
+  <div>
+    <p class="eyebrow">Support incident</p>
+    <h1>{{ ticket['ticket_ref'] }} · {{ ticket['service'] }}</h1>
+  </div>
+  <span class="badge ticket-{{ ticket['ticket_status']|lower|replace(' ', '-') }}">{{ ticket['ticket_status'] }}</span>
+</section>
+<section class="card ticket-summary">
+  <dl class="ticket-facts">
+    <div><dt>Requester</dt><dd>{{ ticket['username'] }}</dd></div>
+    <div><dt>Service status</dt><dd>{{ ticket['status'] }}</dd></div>
+    <div><dt>Priority</dt><dd><span class="badge priority-{{ ticket['priority']|lower }}">{{ ticket['priority'] }}</span></dd></div>
+    <div><dt>Assigned to</dt><dd>{{ ticket['assigned_name'] or 'Unassigned' }}</dd></div>
+    <div><dt>Created (UTC)</dt><dd>{{ ticket['created_at'] }}</dd></div>
+    {% if ticket['resolution_seconds'] is not none %}
+    <div><dt>Time to first resolution</dt><dd>{{ ticket['resolution_seconds'] // 3600 }}h {{ (ticket['resolution_seconds'] % 3600) // 60 }}m</dd></div>
+    {% endif %}
+  </dl>
+  <h2>Issue description</h2>
+  <p class="ticket-description">{{ ticket['description'] }}</p>
+</section>
+
+{% if can_work %}
+<section class="ticket-controls">
+  <div class="card">
+    <h2>Update ticket</h2>
+    <form method="post" action="{{ url_for('update_ticket_status', ticket_id=ticket['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Lifecycle status
+        <select name="ticket_status">{% for s in ticket_statuses %}<option {% if s == ticket['ticket_status'] %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+      </label>
+      <button class="small">Save status</button>
+    </form>
+    <form method="post" action="{{ url_for('update_ticket_priority', ticket_id=ticket['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Priority
+        <select name="priority">{% for p in priorities %}<option {% if p == ticket['priority'] %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
+      </label>
+      <button class="small">Save priority</button>
+    </form>
+  </div>
+  {% if g.user['is_admin'] %}
+  <div class="card">
+    <h2>Assignment</h2>
+    <form method="post" action="{{ url_for('assign_ticket', ticket_id=ticket['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>Support team member
+        <select name="assigned_to">
+          <option value="">Unassigned</option>
+          {% for person in assignees %}
+          <option value="{{ person['id'] }}" {% if person['id'] == ticket['assigned_to'] %}selected{% endif %}>{{ person['username'] }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="small">Save assignment</button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+<section class="card response-form">
+  <h2>Team response</h2>
+  <form method="post" action="{{ url_for('respond_to_ticket', ticket_id=ticket['id']) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Reply to requester
+      <textarea name="body" required maxlength="2000" rows="4"></textarea>
+    </label>
+    <button>Send response</button>
+  </form>
+</section>
+{% endif %}
+
+<h2>Responses</h2>
+<section class="card">
+  {% for response in responses %}
+  <article class="ticket-response">
+    <p><strong>{{ response['username'] or 'Former user' }}</strong><small class="muted"> · {{ response['created_at'] }} UTC</small></p>
+    <p class="ticket-description">{{ response['body'] }}</p>
+  </article>
+  {% else %}<p class="muted">No responses yet.</p>{% endfor %}
+</section>
+
+<h2>Incident timeline</h2>
+<section class="card timeline">
+  {% for event in events %}
+  <article class="timeline-entry">
+    <span class="timeline-marker" aria-hidden="true"></span>
+    <div>
+      <p><strong>{{ event['details'] }}</strong></p>
+      <p class="muted">{{ event['username'] or 'System'}}, {{ event['created_at'] }} UTC</p>
+    </div>
+  </article>
+  {% else %}<p class="muted">No timeline events.</p>{% endfor %}
+</section>
+{% endblock %}
