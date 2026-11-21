@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Security console{% endblock %}
+{% block content %}
+<h1>Security monitoring</h1>
+<p class="muted">Recent authentication events, temporary login blocks and locked accounts.</p>
+
+<h2>Active login blocks</h2>
+<section class="card">
+  <table>
+    <tr><th>IP address</th><th>Scope</th><th>Failed attempts</th><th>Blocked until (UTC)</th></tr>
+    {% for item in active_limits %}
+    <tr>
+      <td>{% if item['username'] and not item['ip_address'] %}All IP addresses{% else %}{{ item['ip_address'] or 'Unknown' }}{% endif %}</td>
+      <td>{{ item['username'] or 'All usernames from this IP' }}</td>
+      <td>{{ item['failed_count'] }}</td>
+      <td>{{ item['blocked_until_utc'] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="muted">No active login blocks.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<h2>Locked accounts</h2>
+<section class="card">
+  <table>
+    <tr><th>Username</th><th>Role</th><th>Account created (UTC)</th></tr>
+    {% for account in locked_accounts %}
+    <tr>
+      <td>{{ account['username'] }}</td>
+      <td>{{ 'Support' if account['is_support'] else 'User' }}</td>
+      <td>{{ account['created_at'] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="3" class="muted">No locked accounts.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<h2>Failed authentication events <small class="muted">(most recent 100, retained up to 90 days)</small></h2>
+<section class="card">
+  <table>
+    <tr><th>Event</th><th>Username</th><th>IP address</th><th>Details</th><th>When (UTC)</th></tr>
+    {% for event in failed_logins %}
+    <tr>
+      <td>{{ event['event_type']|replace('_', ' ') }}</td>
+      <td>{{ event['attempted_username'] or '—' }}</td>
+      <td>{{ event['ip_address'] or 'Unknown' }}</td>
+      <td>{{ event['details'] }}</td>
+      <td>{{ event['created_at'] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="5" class="muted">No recent failed authentication events.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<h2>Administrator audit trail <small class="muted">(most recent 100)</small></h2>
+<section class="card">
+  <table>
+    <tr><th>Administrator</th><th>Action</th><th>Target</th><th>Details</th><th>IP address</th><th>When (UTC)</th></tr>
+    {% for event in audit_events %}
+    <tr>
+      <td>{{ event['username'] or 'Deleted account' }}</td>
+      <td>{{ event['action'] }}</td>
+      <td>{{ event['target_type'] }} {{ event['target_id'] }}</td>
+      <td>{{ event['details'] }}</td>
+      <td>{{ event['ip_address'] or 'Unknown' }}</td>
+      <td>{{ event['created_at'] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="muted">No administrator actions recorded yet.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

@@ -16,8 +16,12 @@
   {% if g.user %}
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
     <a href="{{ url_for('ticket_queue') }}">Tickets</a>
-    {% if g.user['is_admin'] %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
+    {% if g.user['is_admin'] %}
+      <a href="{{ url_for('admin') }}">Admin</a>
+      <a href="{{ url_for('security_console') }}">Security</a>
+    {% endif %}
     <a href="{{ url_for('notifications') }}">Notifications{% if g.unread_notifications %} ({{ g.unread_notifications }}){% endif %}</a>
+    <a href="{{ url_for('change_password') }}">Password</a>
     <span class="who">{{ g.user['username'] }}{% if g.user['is_admin'] %} (admin){% elif g.user['is_support'] %} (support){% endif %}</span>
     <form method="post" action="{{ url_for('logout') }}" class="inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

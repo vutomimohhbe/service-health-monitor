@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app as monitor
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 
 class MonitorTests(unittest.TestCase):
@@ -35,9 +35,12 @@ class MonitorTests(unittest.TestCase):
         monitor.DB_PATH = self.previous_db
         self.temp.cleanup()
 
-    def as_user(self, uid):
-        with self.client.session_transaction() as sess:
+    def as_user(self, uid, client=None):
+        client = client or self.client
+        with client.session_transaction() as sess:
             sess['uid'] = uid
+            sess['session_version'] = 0
+            sess['last_activity'] = monitor.time.time()
 
     def post_log(self, i):
         return self.client.post('/logs', data={
@@ -48,6 +51,7 @@ class MonitorTests(unittest.TestCase):
     def test_standard_account_cannot_access_admin(self):
         self.as_user(self.student_id)
         self.assertEqual(self.client.get('/admin').status_code, 403)
+        self.assertEqual(self.client.get('/admin/security').status_code, 403)
         self.assertEqual(self.client.get('/admin/tickets.csv').status_code, 403)
         self.assertEqual(self.client.post('/admin/users/1/lock').status_code, 403)
 
@@ -316,6 +320,26 @@ class MonitorTests(unittest.TestCase):
         db.close()
         self.assertEqual(count, 0)
 
+    def test_locked_accounts_cannot_log_in_or_use_existing_sessions(self):
+        db = sqlite3.connect(monitor.DB_PATH)
+        db.execute('UPDATE users SET locked = 1 WHERE id = ?', (self.student_id,))
+        db.commit()
+        db.close()
+
+        login_client = monitor.app.test_client()
+        response = login_client.post('/login', data={
+            'username': 'student', 'password': 'student-password-123'})
+        self.assertEqual(response.status_code, 200)
+        with login_client.session_transaction() as sess:
+            self.assertNotIn('uid', sess)
+
+        self.as_user(self.student_id)
+        response = self.client.get('/dashboard')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers['Location'], '/login')
+        with self.client.session_transaction() as sess:
+            self.assertNotIn('uid', sess)
+
     def test_admin_moderation(self):
         self.as_user(self.student_id)
         self.post_log(1)
@@ -338,9 +362,171 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_wrong_login_password_fails(self):
-        self.client.post('/login', data={'username': 'student', 'password': 'wrong'})
+        response = self.client.post('/login', data={'username': 'student', 'password': 'wrong'})
+        self.assertEqual(response.status_code, 200)
         with self.client.session_transaction() as sess:
             self.assertNotIn('uid', sess)
+        db = sqlite3.connect(monitor.DB_PATH)
+        event = db.execute(
+            "SELECT event_type, attempted_username, details FROM security_events "
+            "WHERE event_type = 'login_failed'").fetchone()
+        db.close()
+        self.assertEqual(event, ('login_failed', 'student', 'Invalid username or password.'))
+
+    def test_login_throttle_persists_and_security_console_shows_attempts(self):
+        with patch.object(monitor, 'check_password_hash', return_value=False):
+            for _ in range(monitor.LOGIN_MAX_ATTEMPTS):
+                response = self.client.post('/login', data={
+                    'username': 'unknown', 'password': 'never-store-this-password'})
+                self.assertEqual(response.status_code, 200)
+            blocked = self.client.post('/login', data={
+                'username': 'another-account', 'password': 'never-store-this-password'})
+            self.assertEqual(blocked.status_code, 429)
+
+        monitor.init_db()
+        with patch.object(monitor, 'check_password_hash', return_value=False):
+            persisted_block = self.client.post('/login', data={
+                'username': 'unknown', 'password': 'never-store-this-password'})
+        self.assertEqual(persisted_block.status_code, 429)
+
+        self.as_user(self.admin_id)
+        console = self.client.get('/admin/security')
+        self.assertEqual(console.status_code, 200)
+        self.assertIn(b'login failed', console.data)
+        self.assertIn(b'login rate limited', console.data)
+        self.assertIn(b'unknown', console.data)
+        self.assertIn(b'127.0.0.1', console.data)
+
+        db = sqlite3.connect(monitor.DB_PATH)
+        failed_count = db.execute(
+            "SELECT COUNT(*) FROM security_events WHERE event_type = 'login_failed'").fetchone()[0]
+        rate_limited_count = db.execute(
+            "SELECT COUNT(*) FROM security_events WHERE event_type = 'login_rate_limited'").fetchone()[0]
+        stored_values = repr(db.execute(
+            "SELECT details, attempted_username FROM security_events").fetchall())
+        db.close()
+        self.assertEqual(failed_count, monitor.LOGIN_MAX_ATTEMPTS)
+        self.assertEqual(rate_limited_count, 1)
+        self.assertNotIn('never-store-this-password', stored_values)
+
+    def test_login_throttle_blocks_account_across_ips(self):
+        with patch.object(monitor, 'check_password_hash', return_value=False):
+            for attempt in range(monitor.LOGIN_MAX_ATTEMPTS):
+                response = self.client.post('/login', data={
+                    'username': 'student', 'password': 'wrong'},
+                    environ_base={'REMOTE_ADDR': '192.0.2.{}'.format(attempt + 1)})
+                self.assertEqual(response.status_code, 200)
+            blocked = self.client.post('/login', data={
+                'username': 'student', 'password': 'wrong'},
+                environ_base={'REMOTE_ADDR': '198.51.100.10'})
+        self.assertEqual(blocked.status_code, 429)
+
+    def test_successful_login_clears_ip_failure_bucket(self):
+        login_client = monitor.app.test_client()
+        with patch.object(monitor, 'check_password_hash', return_value=False):
+            for attempt in range(monitor.LOGIN_MAX_ATTEMPTS - 1):
+                response = login_client.post('/login', data={
+                    'username': 'unknown-{}'.format(attempt), 'password': 'wrong'})
+                self.assertEqual(response.status_code, 200)
+
+        success = login_client.post('/login', data={
+            'username': 'student', 'password': 'student-password-123'})
+        self.assertEqual(success.status_code, 302)
+        with patch.object(monitor, 'check_password_hash', return_value=False):
+            next_attempt = login_client.post('/login', data={
+                'username': 'another-unknown', 'password': 'wrong'})
+        self.assertEqual(next_attempt.status_code, 200)
+
+        db = sqlite3.connect(monitor.DB_PATH)
+        ip_failures = db.execute(
+            "SELECT failed_count FROM login_attempts "
+            "WHERE ip_address = '127.0.0.1' AND username = ''").fetchone()
+        db.close()
+        self.assertEqual(ip_failures, (1,))
+
+    def test_password_change_invalidates_other_sessions(self):
+        other_client = monitor.app.test_client()
+        self.as_user(self.student_id)
+        self.as_user(self.student_id, other_client)
+
+        page = self.client.get('/account/password')
+        self.assertEqual(page.status_code, 200)
+        mismatch = self.client.post('/account/password', data={
+            'current_password': 'student-password-123',
+            'new_password': 'a-different-password',
+            'confirm_password': 'not-the-same-password',
+        })
+        self.assertEqual(mismatch.status_code, 200)
+
+        changed = self.client.post('/account/password', data={
+            'current_password': 'student-password-123',
+            'new_password': 'updated-student-password',
+            'confirm_password': 'updated-student-password',
+        })
+        self.assertEqual(changed.status_code, 302)
+        self.assertEqual(self.client.get('/dashboard').status_code, 200)
+        self.assertEqual(other_client.get('/dashboard').status_code, 302)
+
+        db = sqlite3.connect(monitor.DB_PATH)
+        password_hash, version = db.execute(
+            "SELECT password_hash, session_version FROM users WHERE id = ?",
+            (self.student_id,)).fetchone()
+        event = db.execute(
+            "SELECT event_type FROM security_events WHERE actor_id = ? "
+            "AND event_type = 'password_changed'", (self.student_id,)).fetchone()
+        db.close()
+        self.assertTrue(check_password_hash(password_hash, 'updated-student-password'))
+        self.assertEqual(version, 1)
+        self.assertEqual(event[0], 'password_changed')
+
+        new_client = monitor.app.test_client()
+        login = new_client.post('/login', data={
+            'username': 'student', 'password': 'updated-student-password'})
+        self.assertEqual(login.status_code, 302)
+
+    def test_inactive_session_is_signed_out(self):
+        self.as_user(self.student_id)
+        with self.client.session_transaction() as sess:
+            sess['last_activity'] = (
+                monitor.time.time() - monitor.SESSION_IDLE_TIMEOUT_SECONDS - 1)
+        response = self.client.get('/tickets')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers['Location'], '/login')
+        with self.client.session_transaction() as sess:
+            self.assertNotIn('uid', sess)
+        login_page = self.client.get('/login')
+        self.assertIn(b'expired due to inactivity', login_page.data)
+
+        login_client = monitor.app.test_client()
+        self.as_user(self.student_id, login_client)
+        with login_client.session_transaction() as sess:
+            sess['last_activity'] = (
+                monitor.time.time() - monitor.SESSION_IDLE_TIMEOUT_SECONDS - 1)
+        expired_login_page = login_client.get('/login')
+        self.assertEqual(expired_login_page.status_code, 200)
+        self.assertIn(b'Log in', expired_login_page.data)
+        with login_client.session_transaction() as sess:
+            self.assertNotIn('uid', sess)
+
+    def test_admin_audit_and_locked_accounts_are_visible(self):
+        db = sqlite3.connect(monitor.DB_PATH)
+        db.execute("UPDATE users SET locked = 1 WHERE id = ?", (self.student_id,))
+        db.commit()
+        db.close()
+        self.as_user(self.admin_id)
+        self.client.post('/admin/users/{}/lock'.format(self.student_id))
+        db = sqlite3.connect(monitor.DB_PATH)
+        audit = db.execute(
+            "SELECT actor_id, action, target_type, target_id FROM admin_audit "
+            "WHERE action = 'user.unlock'").fetchone()
+        db.execute("UPDATE users SET locked = 1 WHERE id = ?", (self.student_id,))
+        db.commit()
+        db.close()
+
+        console = self.client.get('/admin/security')
+        self.assertEqual(console.status_code, 200)
+        self.assertIn(b'student', console.data)
+        self.assertEqual(audit, (self.admin_id, 'user.unlock', 'user', str(self.student_id)))
 
 
 if __name__ == '__main__':

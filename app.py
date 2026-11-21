@@ -15,8 +15,7 @@ import re
 import secrets
 import sqlite3
 import time
-from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psutil
 from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
@@ -35,7 +34,8 @@ TICKET_STATUSES = ("Open", "In Progress", "Resolved", "Closed")
 PRIORITIES = ("Low", "Medium", "High", "Critical")
 PW_METHOD = "pbkdf2:sha256:600000"
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
-LOGIN_WINDOW, LOGIN_MAX_ATTEMPTS = 300, 8  # 8 failures / 5 min per (ip, username)
+LOGIN_WINDOW, LOGIN_MAX_ATTEMPTS = 300, 8  # 8 failures / 5 min per IP and account
+SESSION_IDLE_TIMEOUT_SECONDS = 15 * 60
 METRIC_SAMPLE_INTERVAL_SECONDS = 60
 METRIC_HISTORY_SECONDS = 24 * 60 * 60
 TICKET_SELECT = """
@@ -124,6 +124,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "0") == "1",
     PERMANENT_SESSION_LIFETIME=7200,
+    SESSION_IDLE_TIMEOUT_SECONDS=SESSION_IDLE_TIMEOUT_SECONDS,
     MAX_CONTENT_LENGTH=16 * 1024,
 )
 csrf = CSRFProtect(app)
@@ -160,6 +161,7 @@ def init_db():
             password_hash TEXT NOT NULL,
             is_admin INTEGER NOT NULL DEFAULT 0,
             is_support INTEGER NOT NULL DEFAULT 0,
+            session_version INTEGER NOT NULL DEFAULT 0,
             locked INTEGER NOT NULL DEFAULT 0,
             submission_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -209,10 +211,39 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS login_attempts (
+            ip_address TEXT NOT NULL,
+            username TEXT NOT NULL,
+            failed_count INTEGER NOT NULL,
+            window_started INTEGER NOT NULL,
+            blocked_until INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (ip_address, username)
+        );
+        CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            attempted_username TEXT NOT NULL DEFAULT '',
+            ip_address TEXT NOT NULL DEFAULT '',
+            details TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS admin_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            action TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            details TEXT NOT NULL,
+            ip_address TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
     if "is_support" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN is_support INTEGER NOT NULL DEFAULT 0")
+    if "session_version" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
     log_columns = {row["name"] for row in db.execute("PRAGMA table_info(logs)")}
     for column, definition in (
         ("ticket_ref", "TEXT"),
@@ -261,6 +292,12 @@ def init_db():
             ON ticket_events(log_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
             ON notifications(user_id, read_at);
+        CREATE INDEX IF NOT EXISTS idx_security_events_recent
+            ON security_events(event_type, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_admin_audit_recent
+            ON admin_audit(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_login_attempts_blocked
+            ON login_attempts(blocked_until);
     """)
     # Bootstrap the first admin from env vars; if no password is supplied,
     # generate one and print it ONCE to the container logs.
@@ -286,7 +323,6 @@ def init_db():
 
 init_db()
 _DUMMY_HASH = generate_password_hash("dummy-password-for-timing", method=PW_METHOD)
-_attempts = defaultdict(deque)
 
 
 #  auth helpers
@@ -295,11 +331,34 @@ def load_user():
     g.user = None
     g.unread_notifications = 0
     uid = session.get("uid")
+    if uid is not None and request.endpoint != "static":
+        last_activity = session.get("last_activity")
+        if (isinstance(last_activity, (int, float))
+                and time.time() - last_activity > app.config["SESSION_IDLE_TIMEOUT_SECONDS"]):
+            session.clear()
+            uid = None
+            flash("Your session expired due to inactivity. Please log in again.", "error")
+            if request.endpoint != "login":
+                return redirect(url_for("login"))
     if uid is not None:
         g.user = get_db().execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
         if g.user is None:
             session.clear()
+        elif g.user["locked"]:
+            session.clear()
+            g.user = None
+            flash("Your account is locked. Please contact an administrator.", "error")
+            if request.endpoint != "login":
+                return redirect(url_for("login"))
+        elif session.get("session_version", 0) != g.user["session_version"]:
+            session.clear()
+            g.user = None
+            flash("Your password or security settings changed. Please log in again.", "error")
+            if request.endpoint != "login":
+                return redirect(url_for("login"))
         else:
+            if request.endpoint != "static":
+                session["last_activity"] = time.time()
             g.unread_notifications = get_db().execute(
                 "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL",
                 (g.user["id"],)).fetchone()[0]
@@ -364,11 +423,103 @@ def normalize_service(value):
     return " ".join(value.casefold().split())
 
 
-def throttled(key) -> bool:
-    now, q = time.time(), _attempts[key]
-    while q and now - q[0] > LOGIN_WINDOW:
-        q.popleft()
-    return len(q) >= LOGIN_MAX_ATTEMPTS
+def record_security_event(event_type, details, attempted_username="", actor_id=None):
+    db = get_db()
+    db.execute(
+        "DELETE FROM security_events WHERE event_type IN "
+        "('login_failed', 'login_rate_limited', 'password_change_failed') "
+        "AND created_at < datetime('now', '-90 days')")
+    db.execute(
+        "INSERT INTO security_events "
+        "(event_type, actor_id, attempted_username, ip_address, details) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (event_type, actor_id, attempted_username[:128],
+         request.remote_addr or "", details))
+
+
+def audit_admin_action(action, target_type, target_id, details):
+    get_db().execute(
+        "INSERT INTO admin_audit "
+        "(actor_id, action, target_type, target_id, details, ip_address) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (g.user["id"], action, target_type, str(target_id), details,
+         request.remote_addr or ""))
+
+
+def login_throttled(ip_address, username, now=None):
+    now = int(time.time()) if now is None else int(now)
+    db = get_db()
+    db.execute(
+        "DELETE FROM login_attempts WHERE blocked_until <= ? AND window_started <= ?",
+        (now, now - LOGIN_WINDOW))
+    normalized_username = username.casefold()[:32]
+    row = db.execute(
+        "SELECT MAX(blocked_until) FROM login_attempts "
+        "WHERE (ip_address = ? AND username = '') "
+        "OR (ip_address = '' AND username = ?) "
+        "OR (ip_address = ? AND username = ?)",
+        (ip_address, normalized_username, ip_address, normalized_username)).fetchone()
+    blocked_until = row[0] or 0
+    return blocked_until > now
+
+
+def record_failed_login(ip_address, username, now=None, details="Invalid username or password."):
+    now = int(time.time()) if now is None else int(now)
+    db = get_db()
+    normalized_username = username.casefold()[:32]
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        record_security_event("login_failed", details, attempted_username=username)
+        activated = False
+        scopes = [(ip_address, "")]
+        if normalized_username:
+            scopes.append(("", normalized_username))
+            if ip_address:
+                scopes.append((ip_address, normalized_username))
+        for scoped_ip, scoped_username in scopes:
+            row = db.execute(
+                "SELECT failed_count, window_started, blocked_until FROM login_attempts "
+                "WHERE ip_address = ? AND username = ?",
+                (scoped_ip, scoped_username)).fetchone()
+            if row is None or now - row["window_started"] >= LOGIN_WINDOW:
+                failed_count, window_started, blocked_until = 1, now, 0
+                db.execute(
+                    "INSERT INTO login_attempts "
+                    "(ip_address, username, failed_count, window_started, blocked_until) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (scoped_ip, scoped_username, failed_count, window_started, blocked_until))
+            else:
+                failed_count = row["failed_count"] + 1
+                window_started = row["window_started"]
+                blocked_until = row["blocked_until"]
+                if failed_count >= LOGIN_MAX_ATTEMPTS and blocked_until <= now:
+                    blocked_until = now + LOGIN_WINDOW
+                    activated = True
+                db.execute(
+                    "UPDATE login_attempts SET failed_count = ?, blocked_until = ? "
+                    "WHERE ip_address = ? AND username = ?",
+                    (failed_count, blocked_until, scoped_ip, scoped_username))
+        if activated:
+            record_security_event(
+                "login_rate_limited", "Repeated failed logins triggered a temporary block.",
+                attempted_username=username)
+        db.execute("COMMIT")
+    except Exception:
+        if db.in_transaction:
+            db.execute("ROLLBACK")
+        raise
+
+
+def clear_login_attempts(ip_address, username):
+    normalized_username = username.casefold()[:32]
+    get_db().execute(
+        "DELETE FROM login_attempts WHERE ip_address = ? AND username = ''",
+        (ip_address,))
+    if normalized_username:
+        get_db().execute(
+            "DELETE FROM login_attempts WHERE username = ? "
+            "AND ip_address IN (?, '')",
+            (normalized_username, ip_address))
 
 
 @app.after_request
@@ -423,21 +574,26 @@ def register():
 def login():
     if request.method == "POST":
         username = request.form.get("username", "").strip()
-        key = (request.remote_addr, username.lower())
-        if throttled(key):
+        ip_address = request.remote_addr or ""
+        if login_throttled(ip_address, username):
             flash("Too many failed attempts. Try again in a few minutes.", "error")
             return render_template("login.html"), 429
         user = get_db().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         # Always run a hash check so response time doesn't reveal valid usernames.
         ok = check_password_hash(user["password_hash"] if user else _DUMMY_HASH,
                                  request.form.get("password", ""))
-        if user and ok:
-            _attempts.pop(key, None)
+        if user and ok and not user["locked"]:
+            clear_login_attempts(ip_address, username)
             session.clear()  # new session on login (prevents fixation)
             session["uid"] = user["id"]
+            session["session_version"] = user["session_version"]
+            session["last_activity"] = time.time()
             session.permanent = True
             return redirect(url_for("dashboard"))
-        _attempts[key].append(time.time())
+        details = ("Login rejected because the account is locked."
+                   if user and user["locked"] and ok
+                   else "Invalid username or password.")
+        record_failed_login(ip_address, username, details=details)
         flash("Invalid username or password.", "error")
     return render_template("login.html")
 
@@ -446,6 +602,53 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.route("/account/password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    if request.method == "POST":
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirmation = request.form.get("confirm_password", "")
+        if not check_password_hash(g.user["password_hash"], current_password):
+            record_security_event(
+                "password_change_failed", "Current password verification failed.",
+                actor_id=g.user["id"])
+            flash("Current password is incorrect.", "error")
+        elif not 10 <= len(new_password) <= 128:
+            flash("New password must be 10-128 characters.", "error")
+        elif new_password != confirmation:
+            flash("New passwords do not match.", "error")
+        elif check_password_hash(g.user["password_hash"], new_password):
+            flash("Choose a password different from your current password.", "error")
+        else:
+            password_hash = generate_password_hash(new_password, method=PW_METHOD)
+            db = get_db()
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(
+                    "UPDATE users SET password_hash = ?, session_version = session_version + 1 "
+                    "WHERE id = ?",
+                    (password_hash, g.user["id"]))
+                version = db.execute(
+                    "SELECT session_version FROM users WHERE id = ?",
+                    (g.user["id"],)).fetchone()["session_version"]
+                record_security_event(
+                    "password_changed", "Account password changed.", actor_id=g.user["id"])
+                db.execute("COMMIT")
+            except Exception:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+            session.clear()
+            session["uid"] = g.user["id"]
+            session["session_version"] = version
+            session["last_activity"] = time.time()
+            session.permanent = True
+            flash("Password changed. Other active sessions have been signed out.", "ok")
+            return redirect(url_for("dashboard"))
+    return render_template("change_password.html")
 
 
 def collect_metrics():
@@ -736,6 +939,41 @@ def admin():
         priorities=PRIORITIES, current=filters, max_logs=MAX_LOGS)
 
 
+@app.route("/admin/security")
+@admin_required
+def security_console():
+    db = get_db()
+    db.execute(
+        "DELETE FROM security_events WHERE event_type IN "
+        "('login_failed', 'login_rate_limited', 'password_change_failed') "
+        "AND created_at < datetime('now', '-90 days')")
+    failed_logins = db.execute(
+        "SELECT event_type, attempted_username, ip_address, details, created_at "
+        "FROM security_events WHERE event_type IN "
+        "('login_failed', 'login_rate_limited', 'password_change_failed') "
+        "ORDER BY id DESC LIMIT 100").fetchall()
+    active_limits = db.execute(
+        "SELECT ip_address, username, failed_count, window_started, blocked_until "
+        "FROM login_attempts WHERE blocked_until > ? ORDER BY blocked_until DESC",
+        (int(time.time()),)).fetchall()
+    active_limits = [
+        dict(row, blocked_until_utc=datetime.fromtimestamp(
+            row["blocked_until"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+        for row in active_limits
+    ]
+    locked_accounts = db.execute(
+        "SELECT id, username, is_support, created_at FROM users "
+        "WHERE locked = 1 ORDER BY username").fetchall()
+    audit_events = db.execute(
+        "SELECT admin_audit.*, users.username FROM admin_audit "
+        "LEFT JOIN users ON users.id = admin_audit.actor_id "
+        "ORDER BY admin_audit.id DESC LIMIT 100").fetchall()
+    return render_template(
+        "security.html", failed_logins=failed_logins,
+        active_limits=active_limits, locked_accounts=locked_accounts,
+        audit_events=audit_events)
+
+
 @app.route("/admin/tickets.csv")
 @admin_required
 def export_tickets():
@@ -790,6 +1028,10 @@ def update_ticket_status(ticket_id):
             (status, status, status, ticket_id))
         ticket_event(ticket_id, g.user["id"], "status",
                      f"Ticket status changed from {ticket['ticket_status']} to {status}.")
+        if g.user["is_admin"]:
+            audit_admin_action(
+                "ticket.status", "ticket", ticket["ticket_ref"],
+                f"Status changed from {ticket['ticket_status']} to {status}.")
         notify_ticket_owner(
             ticket, f"{ticket['ticket_ref']} status updated to {status}.", g.user["id"])
         db.execute("COMMIT")
@@ -822,6 +1064,10 @@ def update_ticket_priority(ticket_id):
         db.execute("UPDATE logs SET priority = ? WHERE id = ?", (priority, ticket_id))
         ticket_event(ticket_id, g.user["id"], "priority",
                      f"Priority changed from {ticket['priority']} to {priority}.")
+        if g.user["is_admin"]:
+            audit_admin_action(
+                "ticket.priority", "ticket", ticket["ticket_ref"],
+                f"Priority changed from {ticket['priority']} to {priority}.")
         notify_ticket_owner(
             ticket, f"{ticket['ticket_ref']} priority updated to {priority}.", g.user["id"])
         db.execute("COMMIT")
@@ -863,6 +1109,9 @@ def assign_ticket(ticket_id):
         db.execute("UPDATE logs SET assigned_to = ? WHERE id = ?", (assignee_id, ticket_id))
         ticket_event(ticket_id, g.user["id"], "assignment",
                      f"Ticket assigned to {assignee_name}.")
+        audit_admin_action(
+            "ticket.assignment", "ticket", ticket["ticket_ref"],
+            f"Assignment changed to {assignee_name}.")
         notify_ticket_owner(
             ticket, f"{ticket['ticket_ref']} assignment updated to {assignee_name}.",
             g.user["id"])
@@ -901,6 +1150,10 @@ def respond_to_ticket(ticket_id):
             (ticket_id, g.user["id"], encrypt_field(body)))
         ticket_event(ticket_id, g.user["id"], "response",
                      f"A response was added by the {role}.")
+        if g.user["is_admin"]:
+            audit_admin_action(
+                "ticket.response", "ticket", ticket["ticket_ref"],
+                "An administrator response was added.")
         notify_ticket_owner(
             ticket, f"New {role} response on {ticket['ticket_ref']}.", g.user["id"])
         db.execute("COMMIT")
@@ -923,6 +1176,10 @@ def flag_log(log_id):
         ticket_event(
             log_id, g.user["id"], "flag",
             "Ticket flagged." if flagged else "Ticket unflagged.")
+        audit_admin_action(
+            "ticket.flag" if flagged else "ticket.unflag",
+            "ticket", ticket["ticket_ref"],
+            "Ticket flagged." if flagged else "Ticket unflagged.")
         db.execute("COMMIT")
     except Exception:
         if db.in_transaction:
@@ -934,8 +1191,18 @@ def flag_log(log_id):
 @app.route("/admin/logs/<int:log_id>/delete", methods=["POST"])
 @admin_required
 def delete_log(log_id):
-    get_ticket_or_404(log_id)
-    get_db().execute("DELETE FROM logs WHERE id = ?", (log_id,))
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        ticket = get_ticket_or_404(log_id)
+        audit_admin_action(
+            "ticket.delete", "ticket", ticket["ticket_ref"], "Ticket deleted.")
+        db.execute("DELETE FROM logs WHERE id = ?", (log_id,))
+        db.execute("COMMIT")
+    except Exception:
+        if db.in_transaction:
+            db.execute("ROLLBACK")
+        raise
     flash("Ticket deleted.", "ok")
     return redirect(url_for("admin"))
 
@@ -961,9 +1228,15 @@ def toggle_support(user_id):
                 flash("Reassign this user's active tickets before removing support access.", "error")
             else:
                 db.execute("UPDATE users SET is_support = 0 WHERE id = ?", (user_id,))
+                audit_admin_action(
+                    "user.support_removed", "user", user_id,
+                    "Support access removed.")
                 flash(f"Support access removed for '{target['username']}'.", "ok")
         else:
             db.execute("UPDATE users SET is_support = 1 WHERE id = ?", (user_id,))
+            audit_admin_action(
+                "user.support_granted", "user", user_id,
+                "Support access granted.")
             flash(f"'{target['username']}' added to the support team.", "ok")
         db.execute("COMMIT")
     except Exception:
@@ -992,9 +1265,15 @@ def toggle_lock(user_id):
                 flash("Reassign this support user's active tickets before locking the account.", "error")
             else:
                 db.execute("UPDATE users SET locked = 1 WHERE id = ?", (user_id,))
+                audit_admin_action(
+                    "user.lock", "user", user_id, "User account locked.")
                 flash(f"User '{target['username']}' locked.", "ok")
         else:
             db.execute("UPDATE users SET locked = 1 - locked WHERE id = ?", (user_id,))
+            audit_admin_action(
+                "user.unlock" if target["locked"] else "user.lock",
+                "user", user_id,
+                "User account unlocked." if target["locked"] else "User account locked.")
             flash(f"User '{target['username']}' {'unlocked' if target['locked'] else 'locked'}.", "ok")
         db.execute("COMMIT")
     except Exception:

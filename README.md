@@ -16,6 +16,9 @@ A secure Flask with SQLite application in **one custom Alpine Linux Docker conta
 - The ticket form suggests open incidents for the same normalized service. Suggestions never prevent submission or automatically merge tickets.
 - Each account can submit **at most five tickets in total** by default; even if an administrator deletes a ticket, the quota is **not restored**. This is a deliberate anti-spam decision. The counter is persistent and concurrency-safe.
 - Operational service names, descriptions, and administrator responses are **encrypted at rest**. User passwords are **hashed**, not encrypted.
+- Login attempts are rate-limited persistently: eight failures in five minutes block the source IP and attempted account across IPs for five minutes. A successful login clears that account's and source IP's failure buckets. Failed attempts are recorded without passwords; authentication events are retained for 90 days.
+- Administrators can review recent failed logins, active blocks, locked accounts, and an audit trail of administrative changes in the Security console.
+- Users can change their passwords after verifying the current password. Changing a password invalidates other sessions; authenticated sessions also expire after 15 minutes without activity.
 
 ## 2. Directory structure
 
@@ -128,10 +131,10 @@ Browser ──HTTP:5000──> Gunicorn (1 worker, 4 threads)
 - **Alpine Linux**: the `Dockerfile` starts from `alpine:3.22`, **not** `python:alpine` or `node:alpine`. Packages installed through Alpine's `apk`: `python3`, `py3-flask`, `py3-flask-wtf`, `py3-psutil`, `py3-gunicorn`, `py3-cryptography` and `sqlite`.
 - **Flask**: handles authentication, pages, input validation, access-control decorators and API routes; Jinja renders escaped templates.
 - **SQLite**: stores account, ticket, response, timeline, notification, and metric-history data with foreign keys and WAL mode; a named Docker volume persists state.
-- **Gunicorn**: one worker with four threads is adequate for a small SQLite-backed app and avoids separate worker-local login-throttle dictionaries.
+- **Gunicorn**: one worker with four threads is the small-app baseline; login-throttle counters live in SQLite and survive process restarts.
 - **Fernet**: encrypts ticket `service`, `description`, and response text before writing to SQLite. Status, priority, references, IDs, timestamps, username and flag state remain unencrypted metadata to support filtering, querying and moderation; don't put passwords or other secrets into those fields.
 
-**Routes:** `/register`, `/login`, `POST /logout`, `/dashboard`, `GET /tickets`, `GET /tickets/<id>`, `POST /tickets`, legacy `POST /logs`, `GET /api/metrics`, `GET /api/metrics/history`, `GET /api/tickets/suggestions`, `/notifications`, `POST /notifications/<id>/read`, `/admin`, `/admin/tickets.csv`, `POST /tickets/<id>/status`, `/tickets/<id>/priority`, `/tickets/<id>/assign`, `/tickets/<id>/responses`, `/admin/logs/<id>/flag`, `/admin/logs/<id>/delete`, `/admin/users/<id>/support`, `/admin/users/<id>/lock`, `/healthz`.
+**Routes:** `/register`, `/login`, `POST /logout`, `GET/POST /account/password`, `/dashboard`, `GET /tickets`, `GET /tickets/<id>`, `POST /tickets`, legacy `POST /logs`, `GET /api/metrics`, `GET /api/metrics/history`, `GET /api/tickets/suggestions`, `/notifications`, `POST /notifications/<id>/read`, `/admin`, `/admin/security`, `/admin/tickets.csv`, `POST /tickets/<id>/status`, `/tickets/<id>/priority`, `/tickets/<id>/assign`, `/tickets/<id>/responses`, `/admin/logs/<id>/flag`, `/admin/logs/<id>/delete`, `/admin/users/<id>/support`, `/admin/users/<id>/lock`, `/healthz`.
 
 ## 6. Security decisions and their limits
 
@@ -144,12 +147,15 @@ Browser ──HTTP:5000──> Gunicorn (1 worker, 4 threads)
 | Unauthorized admin access       | Backend `@admin_required`; never trust a hidden link         | Standard users receive HTTP 403 on admin routes                                    |
 | Ticket access                   | Requesters see their own; support sees assigned tickets; admins see all | Support staff cannot browse unassigned reports                            |
 | Submission spam                 | Atomic `BEGIN IMMEDIATE` / count update / insertion          | Quota counts**lifetime entries**, not entries remaining after deletion       |
-| Account lock                    | Database flag checked at insertion                             | Locked accounts can still view their own dashboards                                |
+| Account lock                    | Locked users cannot log in; active sessions are revoked on the next request | Unlock through the administrator user controls                    |
 | Session theft                   | `HttpOnly`, `SameSite=Lax`, 2h lifetime; `Secure` opt-in | Deploy with TLS for real users                                                     |
+| Stale sessions                  | 15-minute inactivity timeout; password change increments a per-user session version | Sessions are signed client-side; timeout is enforced on the next request |
+| Login guessing                  | SQLite-backed IP and account-across-IP buckets; eight failed attempts in five minutes create a five-minute block | Shared IPs may also be throttled; use a reverse proxy only when trusted proxy configuration is correct |
+| Login auditing                  | Failed usernames, source IPs, timestamps, and rate-limit events; passwords are never recorded | Events older than 90 days are pruned on the next security event or console visit |
+| Administrator actions           | Admin ID, action, target, details, IP, and timestamp recorded transactionally | Audit trail is stored in the same application database and needs protected backups |
 | Ticket confidentiality          | Encrypted service, description, and response text with Fernet | Other ticket metadata remain plaintext; protect DB backups and encryption keys      |
 | HTTP response hardening         | CSP, no-sniff, anti-framing, no-store                          | This does not replace HTTPS                                                        |
 | Container privilege             | Runs as dedicated non-root Linux user                          | Docker daemon/host security remains operator responsibility                        |
-| Login guessing                  | In-memory per-IP-and-username limiter                          | Not persistent across restart; not a production distributed limiter                |
 
 **Metrics accuracy:** `psutil` uses the system interfaces visible from inside Docker. Values such as CPU count, memory totals and uptime **may reflect the Docker host rather than strict container-cgroup consumption**. Treat them as indicative system metrics; for exact cgroup usage, implement `/sys/fs/cgroup` support as an enhancement.
 
@@ -166,7 +172,7 @@ docker run --rm --entrypoint python3 techteam-health-monitor \
   -m unittest discover -s tests -v
 ```
 
-These test routes, ticket migration, role-based access, ticket lifecycle, assignment, encrypted responses, notifications, timeline, search, CSV export, duplicate suggestions, submission quota, XSS escaping, CSRF protection, and user locks. Tests use a temporary database instead of changing `/data/monitor.db`.
+These test routes, ticket migration, role-based access, ticket lifecycle, assignment, encrypted responses, notifications, timeline, search, CSV export, duplicate suggestions, submission quota, XSS escaping, CSRF protection, persistent login throttling, password changes and session invalidation, inactivity expiry, security-console access, and administrator auditing. Tests use a temporary database instead of changing `/data/monitor.db`.
 
 **Important:** The tests intentionally disable CSRF only for ordinary route tests that do not provide HTML CSRF tokens; one separate test turns CSRF **back on** and verifies an invalid request returns 400. This is test-only configuration and does not disable protection in the running app.
 
