@@ -1,5 +1,6 @@
 FROM alpine:3.22
 
+## The packages that our container will use.
 RUN apk add --no-cache python3 py3-flask py3-flask-wtf py3-psutil py3-gunicorn py3-cryptography sqlite
 
 # Unprivileged user + persistent data dir

@@ -5,6 +5,8 @@
 A secure Flask with SQLite application in **one custom Alpine Linux Docker container**.
 
 
+#### **DEMO PRESENTATION VIDEO**: 
+
 ## What the application does
 
 - Standard users **register** and **log in** using salted PBKDF2 password hashes, then see a dashboard.
@@ -20,6 +22,52 @@ A secure Flask with SQLite application in **one custom Alpine Linux Docker conta
 - Administrators can review recent failed logins, active blocks, locked accounts, and an audit trail of administrative changes in the Security console.
 - Users can change their passwords after verifying the current password. Changing a password invalidates other sessions; authenticated sessions also expire after 15 minutes without activity.
 
+## Enhancements beyond the basic functional requirements
+
+The following areas add operational value beyond the basic registration, login, ticket submission and administrator moderation requirements:
+
+### System monitoring and dashboard
+
+- Collects CPU, memory, disk, load and system-uptime information from `psutil` and refreshes it on the dashboard.
+- Records CPU, memory and disk samples approximately once per minute while the dashboard is open.
+- Presents the last 24 hours as resource-history charts and automatically prunes older samples.
+- Labels the application clearly as a **Service Health Monitor**, with a responsive dashboard theme and service-focused status presentation.
+- Uses the SQLite-backed `/api/metrics/history` endpoint for historical readings while keeping data access authenticated.
+
+### Incident and support workflows
+
+- Converts event submissions into incident tickets with automatic `INC-0001`, `INC-0002`, and subsequent references.
+- Supports open, in-progress, resolved and closed ticket lifecycle states.
+- Provides low, medium, high and critical priority levels.
+- Adds administrator assignment, Support roles, assigned-ticket access and requester-only visibility.
+- Records administrator responses, in-app notifications and a chronological timeline of changes.
+- Tracks resolution time and reopened/resolved timestamps.
+- Supports requester, date, service, priority and status filtering, plus formula-safe CSV export.
+- Suggests open incidents for the same normalized service without blocking submission or merging reports automatically.
+- Migrates existing log records into the ticket model while preserving their content, status and creation timestamp.
+
+### Security hardening
+
+- Stores persistent login-rate buckets in SQLite, protecting against application restarts.
+- Applies separate IP and account throttling, with eight failures in five minutes triggering a five-minute block.
+- Records failed logins and rate-limit events without storing passwords or submitted password values.
+- Retains authentication events for 90 days and exposes recent activity through an administrator Security console.
+- Shows active login blocks and locked accounts in the Security console.
+- Records administrative actions transactionally with actor, target, details, IP address and timestamp.
+- Allows users to change passwords after verifying the current password and invalidates other sessions by incrementing the account session version.
+- Logs locked accounts out of existing sessions on their next request and prevents locked accounts from logging in again.
+- Enforces a 15-minute inactivity timeout on authenticated sessions.
+- Adds CSP, no-sniff, anti-framing, same-origin referrer and no-store HTTP headers.
+- Encrypts ticket service names, descriptions and administrator response text with Fernet.
+- Uses role-based route decorators, parameterized SQL, Jinja escaping, CSRF protection and atomic submission quotas.
+
+### Testing and operational resilience
+
+- Tests security and functional behavior against isolated temporary SQLite databases rather than the live `/data/monitor.db`.
+- Covers metric-history spacing and pruning, ticket migration and workflows, notifications, CSV export, duplicate suggestions, rate limiting, locked accounts, password changes, session expiry and administrative auditing.
+- Runs in an unprivileged Alpine Linux container and preserves accounts, tickets, metrics, encryption keys and security records in a named Docker volume.
+- Includes health and application startup checks for local Docker deployment.
+
 ## 2. Directory structure
 
 ```text
@@ -32,7 +80,7 @@ service-health-monitor/
 ├── .dockerignore
 ├── .gitignore
 ├── README.md
-└── CV.pdf               
+└── CV.pdf             
 ```
 
 ## Before you start
@@ -138,24 +186,24 @@ Browser ──HTTP:5000──> Gunicorn (1 worker, 4 threads)
 
 ## 6. Security decisions and their limits
 
-| Risk                            | Protection                                                     | Important limit                                                                    |
-| ------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Password compromise             | Salted PBKDF2-HMAC-SHA256, 600,000 iterations                  | Password policy is basic: 10–128 characters, no breach-password check             |
-| SQL injection                   | SQLite `?` parameters for user data                          | SQL query structure is authored in code; status filter validated against allowlist |
-| Stored/reflected XSS            | Jinja escaping, restricted CSP, input length checks            | Do not add `                                                                       |
-| Cross-site request forgery      | Flask-WTF token on every mutating POST                         | CSRF checks depend on a stable Flask `SECRET_KEY`                                |
-| Unauthorized admin access       | Backend `@admin_required`; never trust a hidden link         | Standard users receive HTTP 403 on admin routes                                    |
-| Ticket access                   | Requesters see their own; support sees assigned tickets; admins see all | Support staff cannot browse unassigned reports                            |
-| Submission spam                 | Atomic `BEGIN IMMEDIATE` / count update / insertion          | Quota counts**lifetime entries**, not entries remaining after deletion       |
-| Account lock                    | Locked users cannot log in; active sessions are revoked on the next request | Unlock through the administrator user controls                    |
-| Session theft                   | `HttpOnly`, `SameSite=Lax`, 2h lifetime; `Secure` opt-in | Deploy with TLS for real users                                                     |
-| Stale sessions                  | 15-minute inactivity timeout; password change increments a per-user session version | Sessions are signed client-side; timeout is enforced on the next request |
-| Login guessing                  | SQLite-backed IP and account-across-IP buckets; eight failed attempts in five minutes create a five-minute block | Shared IPs may also be throttled; use a reverse proxy only when trusted proxy configuration is correct |
-| Login auditing                  | Failed usernames, source IPs, timestamps, and rate-limit events; passwords are never recorded | Events older than 90 days are pruned on the next security event or console visit |
-| Administrator actions           | Admin ID, action, target, details, IP, and timestamp recorded transactionally | Audit trail is stored in the same application database and needs protected backups |
-| Ticket confidentiality          | Encrypted service, description, and response text with Fernet | Other ticket metadata remain plaintext; protect DB backups and encryption keys      |
-| HTTP response hardening         | CSP, no-sniff, anti-framing, no-store                          | This does not replace HTTPS                                                        |
-| Container privilege             | Runs as dedicated non-root Linux user                          | Docker daemon/host security remains operator responsibility                        |
+| Risk                       | Protection                                                                                                       | Important limit                                                                                        |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Password compromise        | Salted PBKDF2-HMAC-SHA256, 600,000 iterations                                                                    | Password policy is basic: 10–128 characters, no breach-password check                                 |
+| SQL injection              | SQLite `?` parameters for user data                                                                            | SQL query structure is authored in code; status filter validated against allowlist                     |
+| Stored/reflected XSS       | Jinja escaping, restricted CSP, input length checks                                                              | Do not add `                                                                                           |
+| Cross-site request forgery | Flask-WTF token on every mutating POST                                                                           | CSRF checks depend on a stable Flask `SECRET_KEY`                                                    |
+| Unauthorized admin access  | Backend `@admin_required`; never trust a hidden link                                                           | Standard users receive HTTP 403 on admin routes                                                        |
+| Ticket access              | Requesters see their own; support sees assigned tickets; admins see all                                          | Support staff cannot browse unassigned reports                                                         |
+| Submission spam            | Atomic `BEGIN IMMEDIATE` / count update / insertion                                                            | Quota counts**lifetime entries**, not entries remaining after deletion                           |
+| Account lock               | Locked users cannot log in; active sessions are revoked on the next request                                      | Unlock through the administrator user controls                                                         |
+| Session theft              | `HttpOnly`, `SameSite=Lax`, 2h lifetime; `Secure` opt-in                                                   | Deploy with TLS for real users                                                                         |
+| Stale sessions             | 15-minute inactivity timeout; password change increments a per-user session version                              | Sessions are signed client-side; timeout is enforced on the next request                               |
+| Login guessing             | SQLite-backed IP and account-across-IP buckets; eight failed attempts in five minutes create a five-minute block | Shared IPs may also be throttled; use a reverse proxy only when trusted proxy configuration is correct |
+| Login auditing             | Failed usernames, source IPs, timestamps, and rate-limit events; passwords are never recorded                    | Events older than 90 days are pruned on the next security event or console visit                       |
+| Administrator actions      | Admin ID, action, target, details, IP, and timestamp recorded transactionally                                    | Audit trail is stored in the same application database and needs protected backups                     |
+| Ticket confidentiality     | Encrypted service, description, and response text with Fernet                                                    | Other ticket metadata remain plaintext; protect DB backups and encryption keys                         |
+| HTTP response hardening    | CSP, no-sniff, anti-framing, no-store                                                                            | This does not replace HTTPS                                                                            |
+| Container privilege        | Runs as dedicated non-root Linux user                                                                            | Docker daemon/host security remains operator responsibility                                            |
 
 **Metrics accuracy:** `psutil` uses the system interfaces visible from inside Docker. Values such as CPU count, memory totals and uptime **may reflect the Docker host rather than strict container-cgroup consumption**. Treat them as indicative system metrics; for exact cgroup usage, implement `/sys/fs/cgroup` support as an enhancement.
 
@@ -215,8 +263,9 @@ These test routes, ticket migration, role-based access, ticket lifecycle, assign
 
 ## Potential optional improvements
 
-1. **Admin action audit trail** storing action, admin user ID, target, and timestamp.
-2. **More accurate container-cgroup metrics** instead of host-level memory/CPU where supported.
-3. **Persistent login throttling** in SQLite instead of in process memory.
-
-Do not implement optional features at the expense of the core functionality, tests, and a well-explained demo.
+1. **Authenticator-based TOTP** for optional or mandatory two-factor login.
+2. **Exact container-cgroup metrics** instead of host-level/system-interface values for CPU and memory.
+3. **Service reachability, response-time and availability-history monitoring** with downtime and uptime-percentage calculations.
+4. **Threshold alerts and automatic incident generation** for CPU, memory, disk or service-failure conditions.
+5. **Encryption-key rotation** that preserves access to existing encrypted ticket data.
+6. **Dependency vulnerability scanning** and a repeatable documented database backup/restore process
